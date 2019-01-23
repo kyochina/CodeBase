@@ -1,4 +1,4 @@
-package com.china.terry;
+package com.china.terry.model;
 
 public class Singleton {
 	private static Singleton singloten;
