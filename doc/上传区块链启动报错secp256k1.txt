@@ -1,0 +1,10 @@
+项目的审核数据上要区块链，在加入了证书文件后，启动报错。
+错误日志中关键报错如下:
+Algorithm constraints check failed on disabled algorithm: secp256k1
+刚开始以为是Oracle JDK不支持，准备换Open JDK试下，
+参考是网上的搜索结果，在这篇博文中看到了解决方法：
+https://zhuanlan.zhihu.com/p/307698537
+说是 当前 jre 禁用了 secp256k1 算法。
+解决：找到前当使用的jre目录， 
+jre1.8.0_281\lib\security 目录下有个 java.security 文件，使用文本编辑器打开
+找到 jdk.disabled.namedCurves 配置，把 secp256k1 算法去掉，再次启动项目就OK了。

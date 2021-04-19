@@ -1,0 +1,10 @@
+run>run configurations 进入配置页 
+左侧菜单双击 Maven Build 新建构建页，Base directory 选择要构建的项目。
+参数设置：
+Goals:  clean install 
+Profiles：test
+勾选 Skip Tests 选项
+ 
+说明 Goals 清空资源，然后再构建
+        Profiles 选择构建的分支，分支是在 pom.xml文件中配置的。
+        Skip Tests 跑过单元测试直接编译。

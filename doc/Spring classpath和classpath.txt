@@ -1,0 +1,16 @@
+classpath和classpath*
+
+在classpath路径下，用classpath:-------
+在非classpath路径下，用 classpath*:-------
+
+<property name="configLocation" value="classpath:sqlMapConfig.xml"></property>
+<property name="mapperLocations" value="classpath*:mapper/**/*Mapper.xml"></property>
+
+文件名字包含通配符资源(如果spring-*.xml，spring*.xml)，   如果根目录为""， classpath加载不到任何资源， 而classpath*则可以加载到classpath中 可以匹配的目录中的资源，但是不能加载到jar包中的资源
+
+2、绝对路径（可以把配置文件放到工程目录以外、如tomcat和jboss的bin目录下：这样做的目的是隔离开发环境和发布环境的配置文件、将差异化配置放到war以外、方便发布）
+可以通过file设置、如：
+<property name="locations"  value="file:D/tomcat6/bin/db.properties" />
+
+具体问题还要具体分析使用
+
