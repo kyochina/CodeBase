@@ -1,0 +1,22 @@
+第一种方法
+@Override
+    public Future runToCloud(String orderNo) {
+        //创建线程池
+        ExecutorService threadPool = Executors.newCachedThreadPool();
+        //获取异步Future对象
+        Future future = threadPool.submit(new Callable<AjaxResult>() {
+            @Override
+            public AjaxResult call() throws ContractException {
+                return uploadAssetInfoToCloud(orderNo);
+            }
+        });
+        return future;
+    }
+@Transactional
+    public AjaxResult uploadAssetInfoToCloud(String orderNo) throws ContractException {}
+
+第二种方法 直接加个注解
+
+@Async
+@Transactional
+    public AjaxResult uploadAssetInfoToCloud(String orderNo) throws ContractException {}
