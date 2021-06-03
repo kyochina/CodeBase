@@ -10,3 +10,6 @@ https://juejin.cn/post/6844903989675458574
 
 JSON 
 https://www.jianshu.com/p/e34e547823fe
+
+Oauth2
+https://blog.didispace.com/spring-security-oauth2-xjf-1/
