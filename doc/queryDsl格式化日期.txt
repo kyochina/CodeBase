@@ -1,0 +1,5 @@
+if(mergerDuring.equals("0")){
+                    groupBylist.add(Expressions.stringTemplate("DATE_FORMAT({0},'%Y-%m')",qBusinessStatement.tranDate));
+                }else if(mergerDuring.equals("1")){
+                    groupBylist.add(Expressions.stringTemplate("DATE_FORMAT({0},'%Y-%m-%d')",qBusinessStatement.tranDate));
+                }
