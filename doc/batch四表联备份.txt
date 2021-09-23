@@ -1,0 +1,271 @@
+package org.wramc.batch.newCountBuilderVoucher;
+
+import com.alibaba.fastjson.JSONArray;
+import com.alibaba.fastjson.JSONObject;
+import com.querydsl.core.BooleanBuilder;
+import com.querydsl.core.Tuple;
+import com.querydsl.core.types.Expression;
+import com.querydsl.core.types.dsl.*;
+import com.sun.xml.bind.v2.TODO;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
+import org.springframework.batch.item.ItemProcessor;
+import org.wramc.base.BatchBase;
+import org.wramc.batch.entity.CredentialRuleManagement;
+import org.wramc.batch.entity.WrBatchBookkeepingVocherTotal;
+import org.wramc.batch.entity.WrBatchVoucherDetailSummaryTotal;
+import org.wramc.batch.vo.voucher.MergeRuleMappingVo;
+import org.wramc.batch.vo.voucher.MergeRulesVo;
+import org.wramc.batch.vo.voucher.MergeSceneVo;
+import org.wramc.batch.vocherProcessorTotal.vo.VocherProcessRuleVo;
+import org.wramc.constant.SysConstants;
+import org.wramc.exception.CustomException;
+import org.wramc.utils.CommUtils;
+import org.wramc.utils.LocalDateUtils;
+import org.wramc.utils.NumberToCN;
+
+import javax.annotation.Nullable;
+import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * 新的生成汇总凭证处理方法，入参为汇总模板对象模板
+ */
+@Slf4j
+public class NewCountBuilderVoucherProcessor extends BatchBase implements ItemProcessor<CredentialRuleManagement, VocherProcessRuleVo> {
+    /**
+     * 新的汇总生成凭证代码逻辑：
+     * 1。根据传入的模板对象，首先解析出来的 合并场景（一条或多条） 会计分录（一条或多条）
+     * 2。双重循环 场景信息+会计分录作为条件 筛选符合条件的数据，
+     * 3。然后根据 合并规则  做为分组条件进行数据分组，
+     * 4。根据 全并规则 处理分组后的数据，主要为 公司段，项目段，往来段，基金流量项等。
+     * 5。提交保存汇总数据，
+     * 6。更新汇总模板表，状态更新为，已使用，然后模板不可删除，不可编辑。
+     *
+     * 重点为 3，4两步，处理合并的数据。
+     *
+     */
+    @Override
+    public VocherProcessRuleVo process(CredentialRuleManagement item) throws Exception {
+        log.info("汇总模板 CredentialRuleManagement:" + item);
+        try {
+            //取出来汇总模板各项配置信息
+
+            String summary = item.getSummary();             //头摘要
+            String mergerDuring = item.getMergerDuring();   //汇总单位  0 按月 1 按天
+            String mergeScene = item.getMergeScene();       //合并场景:  来源系统 业务类型 流水类型 资金用途  JSON字符串
+            String mergeRules = item.getMergeRules();       //合并规则:  会计科目  摘要内容  合并规则    JSON字符串
+
+            if(StringUtils.isBlank(mergeScene)){
+                log.error("汇总凭证合并场景为空：{}",mergeScene);
+                return null;
+            }
+            if(StringUtils.isBlank(mergeRules)){
+                log.error("汇总凭证合并规则为空：{}",mergeRules);
+                return null;
+            }
+
+            //把合并场景 和 合并规则从JSON字符串解析出来成List 数组对象。
+            List<MergeSceneVo> mergeSceneVoList = JSONArray.parseArray(mergeScene, MergeSceneVo.class);;
+            List<MergeRulesVo> mergeRulesVoList = JSONArray.parseArray(mergeRules, MergeRulesVo.class);
+
+            //处理场景  筛选条件
+            List<String> sourceSystemList = new ArrayList<String>();    //来源 系统
+            List<String> businessTypeList = new ArrayList<String>();    //业务类型 （不良资产收购 1）
+            //(收款，付款，无现金流，收益计提)
+            List<String> flowTypeList = new ArrayList<String>();        //流水类型  (关联字典表的收付款类型（receive_type，pay_type）)
+            //1）流水类型=付款时，，举值：1-支付保证金、2-支付债权收购款、3-意向金退回、4-代付费用；5-回款转付；6-费用支出
+            //2）流水类型=收款时，枚举值：1-收取意向金、2-保证金退回、3-债权清收回款-归属我司部分、4-债权清收回款-归属合作方部分、5-服务费（收益权转让模式）、6-违约金（收益权转让模式）、7-代收费用
+            //3）流水类型=无现金流时，枚举值：1-保证金转债权收购款
+            //4）流水类型=收益计提时，枚举值：暂为空）
+            List<String> flowDetailTypesList = new ArrayList<String>(); //资金用途  （收款时对应>
+
+            String companyName="";
+            String deptCode="";
+            String deptName="";
+            String vocherNo =  getVocherNoYS("");    //汇总凭证编号
+            String tranMonth = "";
+            String currency = "";
+            BigDecimal totalBorrowAmount=BigDecimal.ZERO;
+
+
+            for(MergeSceneVo sceneVo:mergeSceneVoList){
+                //来源 系统
+                sourceSystemList.add(sceneVo.getSourceSystem());
+                //业务类型
+                businessTypeList.add(sceneVo.getBusinessType());
+                //流水类型
+                flowTypeList.add(sceneVo.getStreamType());
+                //资金用途
+                flowDetailTypesList.add(sceneVo.getFundsPurpose());
+            }
+
+            for (MergeRulesVo rulesVo:mergeRulesVoList){
+                // switchValue: 0：不合并 1：合并    后台开发标识
+                List<MergeRuleMappingVo> ruleMappingList = rulesVo.getMergeRules();
+                //取规则表中的配置信息
+                String projectSwitchValue = getRuleSwitchValue("project",ruleMappingList);      //项目段
+                String contactSwitchValue = getRuleSwitchValue("contact",ruleMappingList);      //往来段
+                String cashflowSwitchValue = getRuleSwitchValue("cash_flow",ruleMappingList);   //现金流量项
+
+                List<Expression> selectTuple = new ArrayList<Expression>();
+                selectTuple.add(qBusinessStatement.companyName);                //公司名
+                selectTuple.add(qBusinessStatement.deptNo);                     //部门code
+                selectTuple.add(qBusinessStatement.deptName);                   //部门名称
+                selectTuple.add(qBusinessStatement.currency);                   //币种
+                selectTuple.add(qBusinessStatementDetails.tranDate.max());      //交易日期（取的总账日期）
+                selectTuple.add(qBusinessStatementDetails.flowType);            //收付款
+                selectTuple.add(qBusinessStatementDetails.tradeAmt.sum());      //交易金额
+                selectTuple.add(qVoucherDetailSummary.accountNo);               //银行账户
+                selectTuple.add(qVoucherDetailSummary.bankSecondName);          //开户银行
+
+
+
+               // selectTuple.add(qVoucherDetailSummary.accountTitleStr);         //科目描述段   这个按生成凭证的单独处理。
+
+
+                //初始化 筛选条件。
+                BooleanBuilder whereBuilder = new BooleanBuilder();
+                //表关联关系
+                whereBuilder.and(qBusinessStatement.businessNo.equalsIgnoreCase(qBusinessStatementDetails.businessNo));
+                whereBuilder.and(qBusinessStatementDetails.businessNo.equalsIgnoreCase(qbookkeepingVoucher.flowNo));
+                whereBuilder.and(qbookkeepingVoucher.flowNo.equalsIgnoreCase(qVoucherDetailSummary.instanceCode));
+
+                //数据条件(来自场景)
+                whereBuilder.and(qBusinessStatement.source.in(sourceSystemList));                       //系统来源
+                whereBuilder.and(qBusinessStatement.businessType.in(businessTypeList));                 //业务类型
+                whereBuilder.and(qBusinessStatement.flowType.in(flowTypeList));                         //流水类型
+                whereBuilder.and(qBusinessStatementDetails.flowDetailTypes.in(flowDetailTypesList));    //资金用途(关联流水类型)
+
+                //会计科目
+                whereBuilder.and(qVoucherDetailSummary.titleCode.eq(rulesVo.getTitleCode()));
+                //限制凭证的状态 不包含以下 “3:已同步”，“4:同步中”，“6:同步失败”,“7:已审核” 四种情况。
+                whereBuilder.and(qbookkeepingVoucher.voucherStatus.notIn(SysConstants.VOUCHER_STATUS.SYNCED,SysConstants.VOUCHER_STATUS.SYNCHRONIZED,SysConstants.VOUCHER_STATUS.ERROR,SysConstants.VOUCHER_STATUS.AUDIT));
+
+
+
+                //分组参数
+                List<Expression> groupBylist = new ArrayList<Expression>();
+                groupBylist.add(qbookkeepingVoucher.companyName);
+                groupBylist.add(qbookkeepingVoucher.deptCode);
+
+                //汇总单位  0 按月 1 按天
+                if(mergerDuring.equals("0")){
+                    groupBylist.add(Expressions.stringTemplate("DATE_FORMAT({0},'%Y-%m')",qBusinessStatement.tranDate));
+                }else if(mergerDuring.equals("1")){
+                    groupBylist.add(Expressions.stringTemplate("DATE_FORMAT({0},'%Y-%m-%d')",qBusinessStatement.tranDate));
+                }
+
+
+                if(projectSwitchValue.equals("0")){ //项目段不合并，则正常分组处理
+                    selectTuple.add(qBusinessStatementDetails.projectName);
+                    groupBylist.add(qBusinessStatementDetails.projectName);
+                }
+                if(contactSwitchValue.equals("0")){//往来段不合并，则正常分组处理
+                    selectTuple.add(qVoucherDetailSummary.contactInfo);
+                    groupBylist.add(qVoucherDetailSummary.contactInfo);
+                }
+                if(cashflowSwitchValue.equals("0")){//现金流量项不合并，则正常分组处理
+                    selectTuple.add(qVoucherDetailSummary.cashFlow);
+                    groupBylist.add(qVoucherDetailSummary.cashFlow);
+                }
+
+                Expression [] selectTupleExpression = (Expression[])selectTuple.toArray();
+                StringPath [] groupBy  = (StringPath[]) groupBylist.toArray();
+                List<Tuple> trpleList= queryFactory().select(selectTupleExpression)
+                        .from(qBusinessStatement,qBusinessStatementDetails,qVoucherDetailSummary,qbookkeepingVoucher)
+                        .where(whereBuilder)
+                        .groupBy(groupBy)
+                        .fetch();
+                //开始处理查询出来的分组结果信息
+                for(Tuple tuple:trpleList){
+                    companyName = tuple.get(qBusinessStatement.companyName);        //公司名
+                    deptCode = tuple.get(qBusinessStatement.deptNo);                //部门code
+                    deptName = tuple.get(qBusinessStatement.deptName);              //部门名称
+
+                    //汇总单位  0 按月 1 按天   交易期间。
+                    if(mergerDuring.equals("0")){
+                        tranMonth = LocalDateUtils.formatTime(tuple.get(qBusinessStatement.tranDate), LocalDateUtils.DF_YYYY_MM);
+                    }else if(mergerDuring.equals("1")){
+                        tranMonth = LocalDateUtils.formatTime(tuple.get(qBusinessStatement.tranDate), LocalDateUtils.DF_YYYY_MM_DD);
+                    }
+
+
+                    WrBatchVoucherDetailSummaryTotal wrBatchVoucherDetailSummaryTotal = new WrBatchVoucherDetailSummaryTotal();
+                    wrBatchVoucherDetailSummaryTotal.setId(null);
+                    wrBatchVoucherDetailSummaryTotal.setSummary(summary);  //头摘要
+                    wrBatchVoucherDetailSummaryTotal.setVoucherNo(vocherNo);     //汇总凭证号
+
+                    wrBatchVoucherDetailSummaryTotal.setCreateBy("JOB admin");
+
+
+
+
+
+
+                }
+            }
+            //产生汇总记录
+            WrBatchBookkeepingVocherTotal wrBatchBookkeepingVocherTotal = new WrBatchBookkeepingVocherTotal();
+            wrBatchBookkeepingVocherTotal.setVoucherNo(vocherNo);
+            wrBatchBookkeepingVocherTotal.setCompanyName(companyName);
+            wrBatchBookkeepingVocherTotal.setDeptCode(deptCode);
+            wrBatchBookkeepingVocherTotal.setDeptName(deptName);
+            wrBatchBookkeepingVocherTotal.setSummary(summary);  //头摘要，汇总凭证页面配置
+            wrBatchBookkeepingVocherTotal.setEbsStatus(CommUtils.ESBStatusEnum.ESBSTATUS_1.getCode());  //EBS状态，配置为 1：未同步
+            // TODO: 2021/9/10   附件数量统计待处理。
+            //wrBatchBookkeepingVocherTotal.setAttrNum("这里待确认处理？？？？？（附件数据是，业务流水条数据 ？？？？）") ; //附件条数，等确认。
+            wrBatchBookkeepingVocherTotal.setTranMonth(tranMonth);
+            wrBatchBookkeepingVocherTotal.setTranDate(tranMonth);
+            wrBatchBookkeepingVocherTotal.setCurrency(currency);
+            wrBatchBookkeepingVocherTotal.setCreateBy("JOB admin");
+            wrBatchBookkeepingVocherTotal.setVoucherWord("记");
+            wrBatchBookkeepingVocherTotal.setAuditStatus("1");  //设置默认值为1：未审核      审核状态（1.未审核,2已审核)
+
+            // TODO: 2021/9/10    这里的金额合计要处理一下。
+            wrBatchBookkeepingVocherTotal.setTotalBorrowAmount(totalBorrowAmount);
+            String totalAmountStr = NumberToCN.number2CNMontrayUnit(totalBorrowAmount); // 合计金额大写（币种+大写金额）
+            wrBatchBookkeepingVocherTotal.setTotalAmountStr(totalAmountStr);
+            wrBatchBookkeepingVocherTotal.setDelFlag("0");
+            em.persist(wrBatchBookkeepingVocherTotal);
+            em.flush();
+
+
+        } catch (CustomException customException) {
+            //log.error("===customException===={}", JSONObject.toJSON(businessStatement));
+            /*businessStatement.setVoucherBuilded(SysConstants.VOUCHER_BUILD_STATUS.ERROR);
+            businessStatement.setVoucherNo(null);
+            businessStatement.setVoucherTemplate(null);
+            businessStatement.setVoucherErrorMsg(customException.getMessage());*/
+        } catch (Exception e) {
+            /*log.error("===Exception===={}", JSONObject.toJSON(businessStatement));
+            businessStatement.setVoucherBuilded(SysConstants.VOUCHER_BUILD_STATUS.ERROR);
+            businessStatement.setVoucherNo(null);
+            businessStatement.setVoucherTemplate(null);
+            businessStatement.setVoucherErrorMsg("汇总生成失败！");
+            log.error("生成凭证出错：{}", e.getMessage(), e);*/
+        }
+
+        return null;
+
+    }
+
+    /**
+     * 根据 key值获取汇总凭证模板的“核算维度”是否合并的值 switchValue ，
+     * switchValue: 0：不合并 1：合并    后台开发标识
+     * @param key
+     * @param ruleMappingList
+     * @return
+     */
+    private String getRuleSwitchValue(String key,List<MergeRuleMappingVo> ruleMappingList){
+        String switchValue = "";
+        for(MergeRuleMappingVo mergeRule:ruleMappingList){
+            if(key.equals(mergeRule.getCode())){
+                switchValue = mergeRule.getSwitchValue();
+                break;
+            }
+        }
+        return switchValue;
+    }
+}
